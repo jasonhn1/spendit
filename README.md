@@ -22,7 +22,7 @@ The `_headers` file in this folder turns on the security settings automatically 
 The `vercel.json` file turns on the security settings automatically on Vercel.
 
 ### Updating the app later
-Replace the files and redeploy. Open `sw.js` and bump the version in `spend-it-v4` (to `spend-it-v5` and so on) each time, so people's installed copies pick up the new version.
+Replace the files and redeploy. Open `sw.js` and bump the version in `spend-it-v5` (to `spend-it-v5` and so on) each time, so people's installed copies pick up the new version.
 
 ## Keep it safe
 - **Turn on two-factor login** for your Netlify, Vercel and GitHub accounts. Whoever controls those accounts controls the site.

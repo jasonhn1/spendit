@@ -558,7 +558,7 @@ function showTip(el,x,y){
   const ch=el.closest('.chart');if(ch){ch.classList.add('hovering');ch.querySelectorAll('.hot').forEach(n=>n.classList.remove('hot'));const col=el.getAttribute('data-col');if(col!=null)ch.querySelectorAll(`[data-col="${col}"]`).forEach(n=>n.classList.add('hot'))}
 }
 function hideTip(){$('#tip').classList.remove('show');document.querySelectorAll('.chart.hovering').forEach(c=>c.classList.remove('hovering'))}
-document.addEventListener('pointermove',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');if(el)showTip(el,e.clientX,e.clientY);else hideTip()});
+document.addEventListener('pointermove',e=>{if(drag){hideTip();return}const el=e.target.closest&&e.target.closest('[data-tip]');if(el)showTip(el,e.clientX,e.clientY);else hideTip()});
 document.addEventListener('focusin',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');if(el){const r=el.getBoundingClientRect();showTip(el,r.left+r.width/2,r.top)}});
 document.addEventListener('focusout',hideTip);
 addEventListener('scroll',hideTip,{passive:true});
@@ -578,7 +578,7 @@ function donut(parts,total,centerLabel){
   s+=`<text x="${cx}" y="${cy-2}" text-anchor="middle" style="fill:var(--ink);font:600 22px var(--font-ui)">${mk(total)}</text><text x="${cx}" y="${cy+18}" text-anchor="middle" style="font-size:12.5px">${esc(centerLabel)}</text>`;
   return `<div class="chart"><svg viewBox="0 0 220 220" role="img" aria-label="Spending by category group">${s}</svg></div>`;
 }
-function columns({labels,series,stacked=true,height=250,colTips,highlight=null,fmt=mk,W=760}){
+function columns({labels,series,stacked=true,height=250,colTips,highlight=null,fmt=mk,W=760,brush=null}){
   W=Math.max(280,Math.round(W));
   const H=height,L=46,Rr=6,T=10,B=26,iw=W-L-Rr,ih=H-T-B,n=labels.length;
   const totals=labels.map((_,i)=>stacked?series.reduce((s,se)=>s+Math.max(0,se.values[i]||0),0):Math.max(0,...series.map(se=>se.values[i]||0)));
@@ -604,8 +604,50 @@ function columns({labels,series,stacked=true,height=250,colTips,highlight=null,f
     if(i%every===0)s+=`<text x="${cx}" y="${H-7}" text-anchor="middle" ${highlight===i?'style="fill:var(--ink);font-weight:600"':''}>${esc(lab)}</text>`;
     if(colTips)s+=`<rect x="${L+band*i}" y="${T}" width="${band}" height="${ih}" fill="transparent" data-tip="${colTips[i]}" data-col="${i}" tabindex="-1"/>`;
   });
+  if(brush)return `<div class="chart" data-brush="${brush}" data-l="${L}" data-band="${band}" data-w="${W}" data-n="${n}"><svg viewBox="0 0 ${W} ${H}" role="img"><rect class="brush-band" x="0" y="${T}" width="0" height="${ih}" rx="6"/>${s}</svg></div>`;
   return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">${s}</svg></div>`;
 }
+// ---- drag to select months ----
+const BR={};let drag=null;
+function colAt(ch,clientX){const svg=ch.querySelector('svg'),r=svg.getBoundingClientRect();const x=(clientX-r.left)*(+ch.dataset.w/r.width);return Math.max(0,Math.min(+ch.dataset.n-1,Math.floor((x-+ch.dataset.l)/+ch.dataset.band)))}
+function selIdx(months,sel){if(!sel)return null;const a=months.indexOf(sel[0]),b=months.indexOf(sel[1]);if(a<0||b<0)return null;return [Math.min(a,b),Math.max(a,b)]}
+function brushSumHtml(id,sel){
+  const R=BR[id];if(!R)return '';const ix=selIdx(R.months,sel);
+  if(!ix)return `<span class="muted brush-hint">Click and drag across the bars to total any months</span>`;
+  const [a,b]=ix,n=b-a+1;const tots=R.series.map(se=>({se,t:se.values.slice(a,b+1).reduce((x,v)=>x+v,0)}));
+  const tt=tots.reduce((x,o)=>x+o.t,0);
+  const lab=a===b?mLabel(R.months[a],true):`${mLabel(R.months[a])}${R.months[a].slice(0,4)!==R.months[b].slice(0,4)?' '+R.months[a].slice(0,4):''} – ${mLabel(R.months[b],true)}`;
+  const chips=tots.filter(o=>o.t>0).sort((x,y)=>y.t-x.t).slice(0,R.top||4).map(o=>`<span class="bs-chip"><i class="sw" style="background:${o.se.color}"></i>${esc(o.se.name)} <b>${m0(o.t)}</b>${n>1?` <span class="muted">· ${m0(o.t/n)}/mo</span>`:''}</span>`).join('');
+  return `<div class="bs-main"><span class="bs-range">${esc(lab)}</span><span class="muted">${n} month${n>1?'s':''}</span><span>Total <b>${m0(tt)}</b></span>${n>1?`<span>Average <b>${m0(tt/n)}</b>/mo</span>`:''}<button class="btn ghost bs-x" data-act="brush-clear" aria-label="Clear month selection">Clear</button></div><div class="bs-chips">${chips}</div>`;
+}
+function paintSel(sel){
+  document.querySelectorAll('.chart[data-brush]').forEach(ch=>{
+    const R=BR[ch.dataset.brush];if(!R)return;const ix=selIdx(R.months,sel);const band=ch.querySelector('.brush-band');
+    ch.classList.toggle('has-sel',!!ix);
+    ch.querySelectorAll('.mk[data-col]').forEach(m=>{const c=+m.getAttribute('data-col');m.classList.toggle('out',!!ix&&(c<ix[0]||c>ix[1]))});
+    if(band){if(ix){const l=+ch.dataset.l,bw=+ch.dataset.band;band.setAttribute('x',l+bw*ix[0]+1);band.setAttribute('width',Math.max(0,bw*(ix[1]-ix[0]+1)-2))}else band.setAttribute('width',0)}
+  });
+  document.querySelectorAll('[data-brush-sum]').forEach(el=>{el.innerHTML=brushSumHtml(el.dataset.brushSum,sel);el.classList.toggle('on',!!selIdx((BR[el.dataset.brushSum]||{}).months||[],sel))});
+}
+document.addEventListener('pointerdown',e=>{
+  if(e.button!==0)return;const ch=e.target.closest&&e.target.closest('.chart[data-brush]');if(!ch)return;const R=BR[ch.dataset.brush];if(!R)return;
+  const i=colAt(ch,e.clientX);drag={ch,R,a:i,b:i,x:e.clientX,moved:false,prev:UI.selMonths};hideTip();
+  try{ch.setPointerCapture(e.pointerId)}catch(x){}
+  if(e.pointerType==='mouse')e.preventDefault();
+});
+document.addEventListener('pointermove',e=>{
+  if(!drag)return;if(Math.abs(e.clientX-drag.x)>4)drag.moved=true;
+  const i=colAt(drag.ch,e.clientX);if(i!==drag.b||drag.moved){drag.b=i;UI.selMonths=[drag.R.months[drag.a],drag.R.months[drag.b]];paintSel(UI.selMonths)}
+});
+function endDrag(e){
+  if(!drag)return;const d=drag;drag=null;
+  if(e.type==='pointercancel'){UI.selMonths=d.prev;paintSel(UI.selMonths);return}
+  const m=d.R.months[d.a];
+  if(!d.moved&&d.a===d.b&&d.prev&&d.prev[0]===m&&d.prev[1]===m)UI.selMonths=null;
+  else UI.selMonths=[d.R.months[Math.min(d.a,d.b)],d.R.months[Math.max(d.a,d.b)]];
+  paintSel(UI.selMonths);
+}
+document.addEventListener('pointerup',endDrag);document.addEventListener('pointercancel',endDrag);
 function hbars(items,{max,empty='Nothing here yet.',cls=''}={}){
   if(!items.length)return `<p class="muted" style="margin:0">${empty}</p>`;
   const mx=max||Math.max(...items.map(i=>i.value),1);
@@ -666,6 +708,7 @@ function render(){
     if(oT.length&&ov>Math.max(50,sv*.03))html+=`<div class="banner warn"><span><b>${mAuto(ov)}</b> across ${oT.length} transactions is still in <b>Other</b>.${sampleFn?' Claude can take a closer look and sort them.':' Give them a category in Transactions and Spend It remembers it.'}</span>${sampleFn?`<button class="btn" data-act="sort-other" ${UI.sorting?'disabled':''}>${UI.sorting?'Sorting…':'Sort “Other” with Claude'}</button>`:`<button class="btn" data-act="show-other">Review in Transactions</button>`}</div>`}
   html+=({overview:overviewView,transactions:txView,recurring:recurringView,budgets:budgetsView,statements:statementsView}[UI.view]||overviewView)(T,F,b);
   main.innerHTML=html;
+  if(document.querySelector('[data-brush-sum]'))paintSel(UI.selMonths);
   if(UI.view==='transactions')renderTxTable(F);
   fillBoardText();
   if(UI.view==='statements')bindDrops();
@@ -739,7 +782,8 @@ function overviewView(T,F,b){
   const colTips=span.map((m,i)=>{const vs=series.map(s=>s.values[i]),tt=vs.reduce((a,v)=>a+v,0)||1;return tipId(`<div class="t-h">${mLabel(m,true)} · ${mAuto(vs.reduce((a,v)=>a+v,0))}</div>${[...series].reverse().map((s,j)=>{const v=s.values[i];return tipRow(s.name+' · '+Math.round(v/tt*100)+'%',mAuto(v),s.color)+nfTop(m,s.id)}).join('')}`)});
   const avgM=span.length?span.reduce((s,m,i)=>s+series.reduce((a,se)=>a+se.values[i],0),0)/span.length:0;
   const multiY=span.some(x=>x.slice(0,4)!==span[0].slice(0,4));
-  const monthly=columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series,colTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12)});
+  BR.month={months:span,series:gSeries,top:4};BR.nf={months:span,series:[...series].reverse(),top:3};
+  const monthly=columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series,colTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12),brush:span.length>1?'nf':null});
   // weekday
   const wd=[0,0,0,0,0,0,0],wn=[0,0,0,0,0,0,0];for(const t of SP){const d=dow(t.d);wd[d]+=t.a;wn[d]++}
   const order=[1,2,3,4,5,6,0];
@@ -783,8 +827,8 @@ function overviewView(T,F,b){
       <div class="donut-wrap">${donut(parts,total,'spent')}${legend}</div></section>
     ${storyHtml(SP,total,nM,b)}
     <section class="card c12"><div class="card-h"><h2>Your habits</h2><span class="sub">Patterns in how you spend</span></div>${insightsHtml(T,F,SP,total,nM,b)}</section>
-    <section class="card c12"><div class="card-h"><h2>Spending by month</h2><span class="sub" style="display:flex;gap:6px 14px;flex-wrap:wrap;justify-content:flex-end">${[...gSeries].map(s=>({s,t:s.values.reduce((a,v)=>a+v,0)})).sort((x,y)=>y.t-x.t).slice(0,4).map(({s,t})=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(t/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>${columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series:gSeries,colTips:gTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12)})}<div class="series-legend">${gSeries.map(s=>`<span><i class="sw" style="background:${s.color}"></i>${esc(s.name)}</span>`).join('')}<span class="muted">Total average ${m0(gSeries.reduce((s,se)=>s+se.values.reduce((a,v)=>a+v,0),0)/Math.max(1,span.length))} a month</span></div></section>
-    <section class="card c12"><div class="card-h"><h2>Fun vs food vs necessities</h2><span class="sub" style="display:flex;gap:14px;flex-wrap:wrap">${[...series].reverse().map(s=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(s.values.reduce((a,v)=>a+v,0)/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>${monthly}
+    <section class="card c12"><div class="card-h"><h2>Spending by month</h2><span class="sub" style="display:flex;gap:6px 14px;flex-wrap:wrap;justify-content:flex-end">${[...gSeries].map(s=>({s,t:s.values.reduce((a,v)=>a+v,0)})).sort((x,y)=>y.t-x.t).slice(0,4).map(({s,t})=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(t/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>${span.length>1?'<div class="brush-sum" data-brush-sum="month"></div>':''}${columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series:gSeries,colTips:gTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12),brush:span.length>1?'month':null})}<div class="series-legend">${gSeries.map(s=>`<span><i class="sw" style="background:${s.color}"></i>${esc(s.name)}</span>`).join('')}<span class="muted">Total average ${m0(gSeries.reduce((s,se)=>s+se.values.reduce((a,v)=>a+v,0),0)/Math.max(1,span.length))} a month</span></div></section>
+    <section class="card c12"><div class="card-h"><h2>Fun vs food vs necessities</h2><span class="sub" style="display:flex;gap:14px;flex-wrap:wrap">${[...series].reverse().map(s=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(s.values.reduce((a,v)=>a+v,0)/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>${span.length>1?'<div class="brush-sum" data-brush-sum="nf"></div>':''}${monthly}
       ${(()=>{const tot=series.map(s=>s.values.reduce((a,v)=>a+v,0)),tt=tot.reduce((a,v)=>a+v,0)||1;return `<div class="series-legend">${[...series].reverse().map((s,j)=>{const i=series.length-1-j;return `<span><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b>${Math.round(tot[i]/tt*100)}%</b> · ${m0(tot[i])}</span>`}).join('')}<span class="muted">Food: restaurants, fast food, delivery, drinks, desserts and groceries. Necessities: gas, rides, parking, bills, health, personal care and giving. Fun: everything else, including bars.</span></div>`})()}</section>
     ${lifeHtml(SP,nM,needOf,b)}
     ${foodCard}${appsCard}
@@ -1389,6 +1433,7 @@ document.addEventListener('click',e=>{
   else if(act==='import-pick')$('#impIn').click();
   else if(act==='import-cancel'){pendingImport=null;UI.lock=V.key?null:(readVault()?'unlock':'setup');render()}
   else if(act==='erase'){if(a.dataset.confirm)eraseAll();else{a.dataset.confirm='1';a.textContent='Yes, erase everything on this device';setTimeout(()=>{if(a.isConnected){delete a.dataset.confirm;a.textContent='Erase everything and start over'}},5000)}}
+  else if(act==='brush-clear'){UI.selMonths=null;paintSel(null)}
   else if(act==='debt-add'){const D=[...((S.meta&&S.meta.debts)||[])];D.push({name:D.length?'Debt '+(D.length+1):'Credit card',bal:0,apr:24,min:0});S.meta={...S.meta,debts:D};if(!S.example)saveMeta();requestRender();setTimeout(()=>{const n=document.querySelector(`[data-debt="${D.length-1}"][data-f="bal"]`);if(n)n.focus()},80)}
   else if(act==='debt-rm'){const D=[...((S.meta&&S.meta.debts)||[])];D.splice(+a.dataset.i,1);S.meta={...S.meta,debts:D};if(!S.example)saveMeta();requestRender()}
   else if(act==='debt-strat'){S.meta={...S.meta,debtStrat:a.dataset.s};if(!S.example)saveMeta();requestRender()}

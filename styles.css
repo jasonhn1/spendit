@@ -226,6 +226,18 @@ main{max-width:1240px;margin:0 auto;padding-inline:20px;padding-block:22px 64px}
 
 /* Charts */
 .chart{position:relative;width:100%}
+.chart[data-brush]{touch-action:pan-y;cursor:crosshair;user-select:none;-webkit-user-select:none}
+.chart .brush-band{fill:var(--accent);opacity:.09;pointer-events:none}
+.chart .mk.out{opacity:.22;transition:opacity .12s}
+.brush-sum{display:flex;flex-direction:column;gap:6px;font-size:13.5px;margin:-2px 0 10px;min-height:24px}
+.brush-sum.on{background:var(--surface-2,rgba(127,127,127,.07));border-radius:12px;padding:10px 12px}
+.brush-sum .bs-main{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.brush-sum .bs-range{font-weight:600;color:var(--ink)}
+.brush-sum b{color:var(--ink)}
+.brush-sum .bs-chips{display:flex;flex-wrap:wrap;gap:4px 14px}
+.brush-sum .bs-chip{display:inline-flex;align-items:center;gap:6px}
+.brush-sum .bs-x{margin-left:auto;padding:3px 10px;font-size:12.5px}
+.brush-hint{font-size:12.5px}
 .chart svg{display:block;width:100%;height:auto;overflow:visible}
 .chart text{fill:var(--muted);font:12px var(--font-ui);font-variant-numeric:tabular-nums}
 .chart .grid-l{stroke:var(--line);stroke-width:1}
