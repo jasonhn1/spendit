@@ -264,7 +264,40 @@ function parseDateAny(v){
   const d=new Date(s);return isNaN(d)?null:iso(d);
 }
 function numAny(v){if(typeof v==='number')return v;let s=String(v||'').trim();if(!s)return null;const neg=/^\(.*\)$/.test(s)||/^-/.test(s)||/-$/.test(s)||/\bDR\b/i.test(s);s=s.replace(/[^\d.]/g,'');if(!s)return null;const n=parseFloat(s);return isNaN(n)?null:(neg?-n:n)}
+const NOTE_RULES=[
+ [/rent|landlord|lease|🏠|🔑/i,'Rent & Housing'],[/utilit|pg&e|electric|wifi|internet|💡|⚡|📶/i,'Utilities'],
+ [/🍻|🍺|🍷|🍸|🥂|🍹|🥃|drinks?|beers?|shots?|\bbar\b|club|cover/i,'Bars & Nightlife'],
+ [/☕|🧋|coffee|boba|matcha|latte|tea\b/i,'Coffee, Tea & Drinks'],[/🍩|🍦|🍰|🧁|dessert|donut|ice cream/i,'Desserts & Bakery'],
+ [/🌭|hot ?dogs?|^dogs?$|burger|🍔|mcdonald|taco bell|in-n-out|chipotle/i,'Fast Food'],
+ [/🍕|🍣|🍜|🍝|🌮|🌯|🥘|🍱|🥟|🍗|food|dinner|lunch|breakfast|brunch|burrito|pizza|sushi|ramen|pho|kbbq|bbq|hot ?pot|meal|eat/i,'Restaurants'],
+ [/🛒|groceries|grocery|costco|trader/i,'Groceries'],[/🚕|🚗|uber|lyft|ride|taxi/i,'Rideshare & Taxi'],[/⛽|gas\b/i,'Gas & EV Charging'],[/🅿️|parking/i,'Parking & Tolls'],
+ [/✈️|🏨|flight|hotel|airbnb|trip|vacation|vegas|cabin/i,'Travel & Vacation'],[/🎟️|🎫|🎶|🎤|🎵|ticket|concert|festival|show\b|game\b|movie/i,'Events & Tickets'],
+ [/⛳|🎳|golf|bowling|karaoke/i,'Entertainment'],[/🎁|gift|birthday|bday/i,'Gifts'],[/🏋️|gym|climb|yoga/i,'Fitness'],[/💇|haircut|nails/i,'Personal Care'],[/🙏|church|tithe|donat/i,'Charity & Giving']];
+function venmoCat(note,who){for(const [re,c] of NOTE_RULES)if(re.test(note))return c;const c=ruleCat(String(who||''),1);return c==='Other'?'Transfers to People':c}
+function venmoToTxns(rows){
+  let h=-1;for(let i=0;i<Math.min(rows.length,10);i++){const r=rows[i].map(x=>String(x).trim().toLowerCase());if(r.includes('datetime')&&r.some(x=>x.startsWith('amount (total)'))){h=i;break}}
+  if(h<0)return null;
+  const H=rows[h].map(x=>String(x).trim().toLowerCase()),ix=n=>H.indexOf(n);
+  const iD=ix('datetime'),iT=ix('type'),iS=ix('status'),iN=ix('note'),iF=ix('from'),iTo=ix('to'),iA=H.findIndex(x=>x.startsWith('amount (total)')),iDest=ix('destination');
+  const data=rows.slice(h+1).filter(r=>parseDateAny(r[iD])&&String(r[iA]||'').trim());
+  const cnt={};for(const r of data)for(const n of [r[iF],r[iTo]]){const k=String(n||'').trim();if(k)cnt[k]=(cnt[k]||0)+1}
+  const me=(Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0]||[''])[0];
+  const handle=((rows[0]||[]).join(' ').match(/\(@([^)]+)\)/)||[])[1];
+  const out=[];
+  for(const r of data){
+    const st=String(r[iS]||'').toLowerCase();if(st&&!/complete|issued|success|settled/.test(st))continue;
+    let a=numAny(r[iA]);if(!a)continue;a=-a;
+    const type=String(r[iT]||'').trim(),note=String(r[iN]||'').replace(/\s+/g,' ').trim(),from=String(r[iF]||'').trim(),to=String(r[iTo]||'').trim();
+    const who=a>0?(to&&to!==me?to:from):(from&&from!==me?from:to);
+    const xfer=/transfer/i.test(type)||(!from&&!to);
+    out.push({d:parseDateAny(r[iD]),a:r2(a),venmo:true,note,who,
+      raw:(xfer?`Venmo ${type}${r[iDest]?' to '+String(r[iDest]).trim():''}`:`Venmo ${a>0?'to':'from'} ${who}${note?': '+note:''}`).slice(0,120),
+      m:xfer?'Venmo transfer':(who||'Venmo').slice(0,48),c:xfer?'Transfers & Payments':null});
+  }
+  out.kind='venmo';out.account='Venmo'+(handle?' (@'+handle+')':'');return out;
+}
 function tableToTxns(rows){
+  const vm=venmoToTxns(rows);if(vm)return vm;
   let h=-1,cols=null;
   for(let i=0;i<Math.min(rows.length,15);i++){
     const r=rows[i].map(x=>String(x).toLowerCase().trim());
@@ -326,6 +359,7 @@ ${CAT_HELP}
 - Credit card payments, autopay and transfers between the person's own accounts are "Transfers & Payments". Paychecks, direct deposits, interest earned and cash-back deposits are "Income". A refund (negative amount) takes the category of what was refunded.
 - Use everything you know about businesses worldwide, including ones abroad and romanized Japanese or Korean names. A city like Tokyo, Seoul or Kyoto in the description means the person was traveling: still pick what the business is (a Tokyo ramen shop is Restaurants, a Seoul cosmetics store is Personal Care or Shopping), but hotel and booking sites (Tripla, Agoda, Booking.com) are Lodging and tours or experiences are Travel & Vacation. Venues and ticket sellers (Tixr, Dice, Eventbrite, civic auditoriums) are Events & Tickets. Bars, clubs, lounges, music venues with bar tabs and breweries are "Bars & Nightlife" even when they also serve food: if a place is best known as a bar, cocktail spot or nightclub (for example Harper & Rye, 1015 Folsom, Temple, Monroe, Raven Bar, Encore Beach Club, Zouk), choose "Bars & Nightlife". Several small charges at the same venue on one day usually mean a bar tab. But a juice bar, ramen or sushi bar, or a "Restaurant & Bar" is food, and a dim sum "lounge" or tea lounge is not nightlife. Liquor, wine and beverage stores are "Liquor & Wine".
 - Smoke shops, tobacco and hookah are "Smoke & Vape". Convenience stores (7-Eleven, FamilyMart, Lawson, GS25, CU) are "Groceries". A purchase abroad at a business you can't identify is "Travel & Vacation", not "Other". Workplace cafeterias are "Restaurants". Golf courses, mini golf and movie ticket sites are "Entertainment".
+- Descriptions like "Venmo to <person>: <note>" or "Venmo from <person>: <note>" are Venmo payments. Choose the category from the note and emojis (🍕 or pizza → Restaurants, rent → Rent & Housing, 🍻 → Bars & Nightlife, uber → Rideshare & Taxi). Money from a friend paying you back takes the category of what it was for. If the note gives no clue, use "Transfers to People". The clean name is the person or business.
 - Use "Other" only when the description gives no clue at all. Restaurant delivery apps are "Food Delivery". Trader Joe's, Costco (not Costco Gas), Walgreens, CVS, Target, Walmart and other grocery stores are "Groceries"; Amazon and other retailers are "Shopping". Quick-service chains and counter-service burger, taco, chicken and sandwich spots (McDonald's, Taco Bell, In-N-Out, Chipotle, Raising Cane's) are "Fast Food"; sit-down and independent restaurants are "Restaurants". Non-alcoholic drink shops (coffee, Starbucks, matcha, boba and milk tea, juice and smoothies like Jamba) are "Coffee, Tea & Drinks"; donut shops, bakeries and dessert places are "Desserts & Bakery".
 ${header&&i===0?`\nAlso name the account from this statement header, like "Citi Custom Cash ••1087" or "Chase Checking ••4421" (card or account product name plus last 4 digits when shown):\n<<<\n${header.slice(0,1800)}\n>>>\n`:''}
 Items (number | description | amount, positive = money out, negative = money in):
@@ -481,6 +515,7 @@ document.addEventListener('submit',async e=>{
 function allTxns(){
   const out=[],seen={};
   const list=Object.entries(stmts()).sort((a,b)=>((a[1].period||{}).start||'').localeCompare((b[1].period||{}).start||''));
+  const hasVenmo=list.some(([,s])=>s.source==='venmo');
   for(const [sid,st] of list){
     const lc={};
     (st.txns||[]).forEach((t,i)=>{
@@ -489,7 +524,7 @@ function allTxns(){
       if(seen[dk]&&seen[dk].sid!==sid&&lc[dk]<=seen[dk].n)return;
       if(!seen[dk]||seen[dk].sid===sid)seen[dk]={sid,n:lc[dk]};
       const key=(t.m||'').toLowerCase();
-      let cat=legacyCat(t.u?t.c:(S.meta.rules[key]||t.c||'Other'),t);if(!t.u&&!S.meta.rules[key]&&(cat==='Restaurants'||cat==='Other'||cat==='Fast Food'||cat==='Bars & Nightlife')){const s0=(t.r||'')+' '+(t.m||'');if(isNight(s0))cat='Bars & Nightlife';else if(cat==='Bars & Nightlife'&&NOT_NIGHT.test(s0))cat=/juice|smoothie|coffee|espresso|boba|milk tea/i.test(s0)?'Coffee, Tea & Drinks':/cinemark|rstbar/i.test(s0)?'Entertainment':/run club/i.test(s0)?'Fitness':'Restaurants'}if(!t.u&&!S.meta.rules[key]&&cat!=='Income'&&cat!=='Transfers & Payments'&&!/costco\s*gas|gas station|fuel/i.test((t.r||'')+' '+(t.m||''))&&GROC.test((t.r||'')+' '+(t.m||'')))cat='Groceries';if(!t.u&&!S.meta.rules[key]){const kc=knownCat((t.r||'')+' '+(t.m||''));if(kc)cat=kc}if(!ALLCATS.includes(cat))cat='Other';
+      let cat=legacyCat(t.u?t.c:(S.meta.rules[key]||t.c||'Other'),t);if(hasVenmo&&st.source!=='venmo'&&!t.u&&/venmo/i.test(t.r||''))cat='Transfers & Payments';if(!t.u&&!S.meta.rules[key]&&(cat==='Restaurants'||cat==='Other'||cat==='Fast Food'||cat==='Bars & Nightlife')){const s0=(t.r||'')+' '+(t.m||'');if(isNight(s0))cat='Bars & Nightlife';else if(cat==='Bars & Nightlife'&&NOT_NIGHT.test(s0))cat=/juice|smoothie|coffee|espresso|boba|milk tea/i.test(s0)?'Coffee, Tea & Drinks':/cinemark|rstbar/i.test(s0)?'Entertainment':/run club/i.test(s0)?'Fitness':'Restaurants'}if(!t.u&&!S.meta.rules[key]&&cat!=='Income'&&cat!=='Transfers & Payments'&&!/costco\s*gas|gas station|fuel/i.test((t.r||'')+' '+(t.m||''))&&GROC.test((t.r||'')+' '+(t.m||'')))cat='Groceries';if(!t.u&&!S.meta.rules[key]){const kc=knownCat((t.r||'')+' '+(t.m||''));if(kc)cat=kc}if(!ALLCATS.includes(cat))cat='Other';
       out.push({id:sid+':'+i,sid,i,d:t.d,m:nameFix(t.r||'')||t.m||cleanName(t.r),r:t.r||'',a:t.a,cat,key,kind:cat==='Income'?'income':cat==='Transfers & Payments'?'transfer':'spend',acct:st.account||'Account'});
     });
   }
@@ -643,7 +678,7 @@ function emptyView(){
       <h2>See where your money actually goes</h2>
       <p class="lede">Drop in your bank and credit card statements. Spend It pulls out every transaction, sorts it into categories, and shows your spending habits month by month.</p>
       <ol class="steps">
-        <li><span class="n">1</span><span><b>Upload statements.</b> PDF statements, or CSV and Excel exports from any bank. Add as many months as you have.</span></li>
+        <li><span class="n">1</span><span><b>Upload statements.</b> PDF statements, Venmo CSV statements, or CSV and Excel exports from any bank. Add as many months as you have.</span></li>
         <li><span class="n">2</span><span><b>Spend It sorts them.</b> Each purchase gets a clean merchant name and a category, and totals are checked against the statement.</span></li>
         <li><span class="n">3</span><span><b>Explore your habits.</b> Category breakdowns, monthly trends, recurring charges and budgets. Fix any category and Spend It remembers it.</span></li>
       </ol>
@@ -1206,7 +1241,7 @@ function statementsView(T){
     const rep=reportedTotals(st.reported);let pill='<span class="pill">No totals to check</span>';
     if(rep&&(rep.out!=null||rep.in!=null)){const dO=rep.out!=null?Math.abs(out-rep.out):0,dI=rep.in!=null?Math.abs(inn-rep.in):0;pill=dO<.01&&dI<.01?'<span class="pill good">✓ Matches statement</span>':`<span class="pill warn">⚠ Off by ${m2(Math.max(dO,dI))}</span>`}
     const p=st.period?`${dLabel(st.period.start)} – ${dLabelY(st.period.end)}`:'';
-    return `<tr><td><div class="merch"><span class="name">${esc(st.account||'Account')}</span><span class="raw">${esc(st.name||'')}</span></div></td><td class="date">${p}</td><td class="amt">${tx.length}</td><td class="amt">${m2(out)}</td><td>${pill}</td><td class="hide-sm muted" style="font-size:13px">${st.source==='claude'?'Read by Claude':st.source==='table'?'Spreadsheet':'Read in page'}</td><td><div class="row-actions">${S.example?'':`<button class="btn ghost danger" data-act="rm" data-id="${id}">Remove</button>`}</div></td></tr>`;
+    return `<tr><td><div class="merch"><span class="name">${esc(st.account||'Account')}</span><span class="raw">${esc(st.name||'')}</span></div></td><td class="date">${p}</td><td class="amt">${tx.length}</td><td class="amt">${m2(out)}</td><td>${pill}</td><td class="hide-sm muted" style="font-size:13px">${st.source==='claude'?'Read by Claude':st.source==='venmo'?'Venmo CSV':st.source==='table'?'Spreadsheet':'Read in page'}</td><td><div class="row-actions">${S.example?'':`<button class="btn ghost danger" data-act="rm" data-id="${id}">Remove</button>`}</div></td></tr>`;
   }).join('');
   return `<div class="grid">
     <section class="card c12"><div class="card-h"><h2>Add more statements</h2><span class="sub">Duplicates are skipped automatically</span></div>${dropZone()}</section>
@@ -1233,7 +1268,7 @@ function renderSheet(){
   s.innerHTML=`<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetT"><div class="sheet-h"><h2 id="sheetT">Add statements</h2><button class="btn ghost" data-act="close-sheet" ${busy?'disabled':''} aria-label="Close">${busy?'Working…':'Done'}</button></div>
     ${dropZone()}
     ${queue.length?`<ul class="queue">${queue.map(q=>`<li><span>${q.busy?'<span class="spin"></span>':q.err?'<span style="color:var(--crit-ink);font-weight:700">✕</span>':q.skip?'<span class="muted">–</span>':'<span style="color:var(--good-ink);font-weight:700">✓</span>'}</span><div style="min-width:0"><div class="fn">${esc(q.name)}</div><div class="st">${esc(q.status)}</div></div><span>${q.pill||''}</span></li>`).join('')}</ul>`:''}
-    <p class="fine">PDF statements work best. You can also use CSV or Excel exports. Files are read on this device and never leave it. Fix any category in Transactions and Spend It remembers it for next time.</p></div>`;
+    <p class="fine">PDF statements work best. You can also use CSV or Excel exports. For Venmo, go to venmo.com → Statements and download the CSV. Files are read on this device and never leave it. Fix any category in Transactions and Spend It remembers it for next time.</p></div>`;
   bindDrops();
 }
 async function handleFiles(files){
@@ -1271,21 +1306,22 @@ async function processFile(it){
     let table;
     if(/\.xlsx?$/i.test(f.name)){await loadXLSX();const wb=XLSX.read(buf,{type:'array'});table=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:''})}
     else table=parseDelimited(new TextDecoder().decode(buf));
-    rows=tableToTxns(table);source='table';
+    rows=tableToTxns(table);source=rows.kind==='venmo'?'venmo':'table';
     if(!rows.length)throw new Error('No transactions found in this file.');
     const ds=rows.map(r=>r.d).sort();period={start:ds[0],end:ds[ds.length-1]};
-    account=f.name.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ').slice(0,40);
+    account=rows.account||f.name.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ').slice(0,40);
   }
   // categorize
   const need=new Map();
+  if(source==='venmo'&&!sampleFn)for(const r of rows)if(!r.c)r.c=venmoCat(r.note,r.who);
   for(const r of rows){if(r.c)continue;const k=rawKey(r.raw);if(S.merchants[k]){r.m=S.merchants[k].m;r.c=S.merchants[k].c}else if(!need.has(k))need.set(k,{key:k,raw:r.raw,a:r.a})}
   let note='';
   if(sampleFn&&(need.size||source==='parser')){
     set(`Categorizing ${need.size} merchants with Claude…`);
-    try{const res=await aiCategorize([...need.values()],source==='parser'?header:null);if(res.account&&source!=='table')account=res.account;for(const [k,v] of Object.entries(res.map)){S.merchants[k]=v}}
+    try{const res=await aiCategorize([...need.values()],source==='parser'?header:null);if(res.account&&source==='parser')account=res.account;for(const [k,v] of Object.entries(res.map)){S.merchants[k]=v}}
     catch(e){note=aiErr(e)}
   }
-  for(const r of rows){if(!r.c){const k=rawKey(r.raw);const v=S.merchants[k]||{m:cleanName(r.raw),c:ruleCat(r.raw,r.a)};if(!S.merchants[k]&&!sampleFn)S.merchants[k]=v;r.m=r.m||v.m;r.c=v.c}}
+  for(const r of rows){if(!r.c){const k=rawKey(r.raw);const v=S.merchants[k]||(r.venmo?{m:r.m,c:venmoCat(r.note,r.who)}:{m:cleanName(r.raw),c:ruleCat(r.raw,r.a)});if(!S.merchants[k]&&!sampleFn)S.merchants[k]=v;r.m=r.m||v.m;r.c=v.c}}
   const doc={name:f.name,account:account||'Account',period,reported,source,uploadedAt:new Date().toISOString(),txns:rows.map(r=>({d:r.d,r:String(r.raw).slice(0,120),m:r.m||cleanName(r.raw),a:r.a,c:r.c||'Other'}))};
   S.statements[id]=doc;
   write(id,doc);saveMerchants();
