@@ -231,6 +231,20 @@ const PDFJS='lib/';
 const loadScript=src=>new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('The PDF reader did not load. Check your connection and try again.'));document.head.appendChild(s)});
 let pdfLoading=null;
 function loadPdf(){if(window.pdfjsLib&&window.pdfjsWorker)return Promise.resolve();return pdfLoading||(pdfLoading=loadScript(PDFJS+'pdf.min.js').then(()=>loadScript(PDFJS+'pdf.worker.min.js')).then(()=>{pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS+'pdf.worker.min.js'}).catch(e=>{pdfLoading=null;throw e}))}
+const NAME_STOP=new Set('STATEMENT ACCOUNT ACCOUNTS SUMMARY PAYMENT PAYMENTS BALANCE CARD CARDS CITI CHASE BANK AMERICA CREDIT DEBIT TOTAL NEW MINIMUM DUE CUSTOMER SERVICE PO BOX VISA MASTERCARD AMEX AMERICAN EXPRESS WELLS FARGO CAPITAL ONE DISCOVER INTEREST FEES FEE TRANSACTIONS TRANSACTION PURCHASES PURCHASE PAGE MEMBER BILLING PREVIOUS ANNUAL PERCENTAGE RATE DATE AMOUNT DESCRIPTION COSTCO REWARDS CASH BACK PERIOD CLOSING OPENING CHECKING SAVINGS ONLINE MOBILE PLEASE SEND MAKE CHECK PAYABLE THE AND OF FOR TO YOUR JANUARY FEBRUARY MARCH APRIL MAY JUNE JULY AUGUST SEPTEMBER OCTOBER NOVEMBER DECEMBER INC LLC CO CORP NA USA US'.split(' '));
+const titleCase=s=>String(s).toLowerCase().replace(/(^|[\s'-])([a-z])/g,(m,a,b)=>a+b.toUpperCase());
+function holderFromLines(lines){
+  const L=lines.slice(0,120),sc={};
+  const addr=/^\d{2,6}\s+[A-Z0-9 .'-]+\b(DR|DRIVE|ST|STREET|AVE|AVENUE|RD|ROAD|LN|LANE|CT|COURT|WAY|BLVD|PL|PLACE|CIR|CIRCLE|PKWY|TER|HWY|TRL|LOOP|SQ)\b/i;
+  L.forEach((ln,i)=>{
+    const m=ln.match(/^((?:[A-Z][A-Z'\-]*\.?\s+){1,3}[A-Z][A-Z'\-]+)(?=\s+[A-Z][a-z]|\s*$|\s+\d)/);if(!m)return;
+    const toks=m[1].split(/\s+/);if(toks.length<2||toks[0].length<2||toks.some(t=>NAME_STOP.has(t.replace(/\.$/,''))))return;
+    const k=m[1];sc[k]=(sc[k]||0)+1;if(L.slice(i+1,i+4).some(x=>addr.test(x)))sc[k]+=2;
+  });
+  const best=Object.entries(sc).sort((a,b)=>b[1]-a[1])[0];
+  return best&&best[1]>=2?titleCase(best[0]):null;
+}
+function holderFirst(){const c={};for(const st of Object.values(stmts())){const f=String(st.holder||'').trim().split(/\s+/)[0];if(f)c[f]=(c[f]||0)+1}return (Object.entries(c).sort((a,b)=>b[1]-a[1])[0]||[''])[0]}
 async function pdfLines(buf){
   await loadPdf();
   let doc;
@@ -294,7 +308,7 @@ function venmoToTxns(rows){
       raw:(xfer?`Venmo ${type}${r[iDest]?' to '+String(r[iDest]).trim():''}`:`Venmo ${a>0?'to':'from'} ${who}${note?': '+note:''}`).slice(0,120),
       m:xfer?'Venmo transfer':(who||'Venmo').slice(0,48),c:xfer?'Transfers & Payments':null});
   }
-  out.kind='venmo';out.account='Venmo'+(handle?' (@'+handle+')':'');return out;
+  out.holder=me?titleCase(me):null;out.kind='venmo';out.account='Venmo'+(handle?' (@'+handle+')':'');return out;
 }
 function tableToTxns(rows){
   const vm=venmoToTxns(rows);if(vm)return vm;
@@ -450,7 +464,7 @@ async function unlock(pass){
 }
 async function createVault(pass){
   V.salt=crypto.getRandomValues(new Uint8Array(16));V.key=await deriveKey(pass,V.salt);
-  S.mode='local';UI.lock=null;await persistNow();setSaveState('ok','Encrypted on this device');armAutoLock();pendingRender=false;if(document.activeElement)document.activeElement.blur();render();
+  S.mode='local';UI.lock='guide';await persistNow();setSaveState('ok','Encrypted on this device');armAutoLock();pendingRender=false;if(document.activeElement)document.activeElement.blur();render();
 }
 async function changePasscode(pass){
   V.salt=crypto.getRandomValues(new Uint8Array(16));V.key=await deriveKey(pass,V.salt);await persistNow();
@@ -677,12 +691,13 @@ function render(){
   TIPS.length=0;
   const main=$('#main');
   if(UI.lock){
-    ['#rangeSel','#acctSel','#addBtn','#lockBtn','#tabs'].forEach(s=>{const e=$(s);if(e)e.hidden=true});
+    ['#rangeSel','#acctSel','#addBtn','#lockBtn','#helpBtn','#tabs'].forEach(s=>{const e=$(s);if(e)e.hidden=true});
+    if(UI.lock==='guide'){$('#lockBtn').hidden=false;main.innerHTML=guideView();window.scrollTo(0,0);return}
     main.innerHTML=UI.lock==='import'?importView():lockView();
     const f=$('#pass1')||$('#impPass');if(f)setTimeout(()=>f.focus(),30);
     return;
   }
-  $('#addBtn').hidden=false;$('#lockBtn').hidden=false;
+  $('#addBtn').hidden=false;$('#lockBtn').hidden=false;$('#helpBtn').hidden=false;
   const T=allTxns();
   const hasData=Object.keys(stmts()).length>0;
   // controls
@@ -706,7 +721,7 @@ function render(){
   let html=S.example?`<div class="banner"><span><b>Example data.</b> These numbers are made up so you can look around. Add your own statements to replace them.</span><button class="btn" data-act="clear-example">Clear example</button></div>`:'';
   if(UI.view!=='statements'&&!S.example){const oT=F.filter(t=>t.cat==='Other'&&t.kind==='spend'&&!t.u);const ov=oT.reduce((s,t)=>s+t.a,0);const sv=F.filter(t=>t.kind==='spend').reduce((s,t)=>s+t.a,0);
     if(oT.length&&ov>Math.max(50,sv*.03))html+=`<div class="banner warn"><span><b>${mAuto(ov)}</b> across ${oT.length} transactions is still in <b>Other</b>.${sampleFn?' Claude can take a closer look and sort them.':' Give them a category in Transactions and Spend It remembers it.'}</span>${sampleFn?`<button class="btn" data-act="sort-other" ${UI.sorting?'disabled':''}>${UI.sorting?'Sorting…':'Sort “Other” with Claude'}</button>`:`<button class="btn" data-act="show-other">Review in Transactions</button>`}</div>`}
-  html+=({overview:overviewView,transactions:txView,recurring:recurringView,budgets:budgetsView,statements:statementsView}[UI.view]||overviewView)(T,F,b);
+  html+=({overview:overviewView,transactions:txView,recurring:recurringView,statements:statementsView}[UI.view]||overviewView)(T,F,b);
   main.innerHTML=html;
   if(document.querySelector('[data-brush-sum]'))paintSel(UI.selMonths);
   if(UI.view==='transactions')renderTxTable(F);
@@ -723,7 +738,7 @@ function emptyView(){
       <ol class="steps">
         <li><span class="n">1</span><span><b>Upload statements.</b> PDF statements, Venmo CSV statements, or CSV and Excel exports from any bank. Add as many months as you have.</span></li>
         <li><span class="n">2</span><span><b>Spend It sorts them.</b> Each purchase gets a clean merchant name and a category, and totals are checked against the statement.</span></li>
-        <li><span class="n">3</span><span><b>Explore your habits.</b> Category breakdowns, monthly trends, recurring charges and budgets. Fix any category and Spend It remembers it.</span></li>
+        <li><span class="n">3</span><span><b>Explore your habits.</b> Category breakdowns, monthly trends, recurring charges and projected savings. Fix any category and Spend It remembers it.</span></li>
       </ol>
       <button class="btn ghost" data-act="example">See it with example data</button>
     </div>
@@ -806,9 +821,10 @@ function overviewView(T,F,b){
   const FOOD2=[['Restaurants','--s1',['Restaurants','Food Delivery']],['Fast food','--s2',['Fast Food']],['Groceries','--s4',['Groceries']]];
   const foodSeries=FOOD2.map(([n,c,cs])=>({name:n,color:`var(${c})`,cs,values:span.map(m=>TA.filter(t=>t.d.slice(0,7)===m&&cs.includes(t.cat)).reduce((s,t)=>s+t.a,0))})).filter(s=>s.values.some(v=>v>0));
   const foodTips=span.map((m,i)=>{const rows=foodSeries.map(s=>[s,s.values[i]]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]);const tt=rows.reduce((s,x)=>s+x[1],0);return tipId(`<div class="t-h">${mLabel(m,true)} · ${mAuto(tt)}</div>${rows.map(([s,v])=>tipRow(s.name+' · '+Math.round(v/tt*100)+'%',mAuto(v),s.color)).join('')}`)});
+  BR.food={months:span,series:foodSeries,top:3};
   const foodAvg0=span.length?foodSeries.reduce((s,se)=>s+se.values.reduce((a,v)=>a+v,0),0)/span.length:0;
   const foodCard=foodRows.length?`<section class="card c12"><div class="card-h"><h2>Restaurants vs fast food vs groceries</h2><span class="sub" style="display:flex;gap:14px;flex-wrap:wrap">${foodSeries.map(s=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(s.values.reduce((a,v)=>a+v,0)/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>
-    ${columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series:foodSeries,stacked:false,colTips:foodTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12)})}
+    ${span.length>1?'<div class="brush-sum" data-brush-sum="food"></div>':''}${columns({labels:span.map((m,i)=>mLabel(m)+(multiY&&(i===0||m.endsWith('-01'))?" '"+m.slice(2,4):'')),series:foodSeries,stacked:false,colTips:foodTips,highlight:b.single?span.indexOf(b.from):null,W:cardW(12),brush:span.length>1?'food':null})}
     ${(()=>{const tots=foodSeries.map(s=>s.values.reduce((a,v)=>a+v,0));const tt=tots.reduce((a,v)=>a+v,0)||1;return `<div class="series-legend">${foodSeries.map((s,i)=>`<span><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b>${Math.round(tots[i]/tt*100)}%</b> · ${m0(tots[i])}</span>`).join('')}<span class="muted">Restaurants include delivery</span></div>`})()}</section>`:'';
   // largest
   const big=[...SP].sort((a,b)=>b.a-a.a).slice(0,6);
@@ -831,9 +847,9 @@ function overviewView(T,F,b){
     <section class="card c12"><div class="card-h"><h2>Fun vs food vs necessities</h2><span class="sub" style="display:flex;gap:14px;flex-wrap:wrap">${[...series].reverse().map(s=>`<span style="display:inline-flex;align-items:center;gap:6px"><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b style="color:var(--ink)">${m0(s.values.reduce((a,v)=>a+v,0)/Math.max(1,span.length))}</b>/mo avg</span>`).join('')}</span></div>${span.length>1?'<div class="brush-sum" data-brush-sum="nf"></div>':''}${monthly}
       ${(()=>{const tot=series.map(s=>s.values.reduce((a,v)=>a+v,0)),tt=tot.reduce((a,v)=>a+v,0)||1;return `<div class="series-legend">${[...series].reverse().map((s,j)=>{const i=series.length-1-j;return `<span><i class="sw" style="background:${s.color}"></i>${esc(s.name)} <b>${Math.round(tot[i]/tt*100)}%</b> · ${m0(tot[i])}</span>`}).join('')}<span class="muted">Food: restaurants, fast food, delivery, drinks, desserts and groceries. Necessities: gas, rides, parking, bills, health, personal care and giving. Fun: everything else, including bars.</span></div>`})()}</section>
     ${lifeHtml(SP,nM,needOf,b)}
+    ${goalHtml()}
     ${foodCard}${appsCard}
     <section class="card ${appsCard?'c6':'c12'}"><div class="card-h"><h2>Top merchants</h2><span class="sub">By times visited</span></div>${hbars(merch)}</section>
-    ${goalHtml()}
     ${debtHtml()}
   </div>`;
 }
@@ -886,16 +902,58 @@ const US_ST=new Set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD
 const COUNTRY={JP:'Japan',KR:'South Korea',MX:'Mexico',GB:'the UK',FR:'France',IT:'Italy',ES:'Spain',DE:'Germany',CA:'Canada',TH:'Thailand',VN:'Vietnam',PH:'the Philippines',TW:'Taiwan',HK:'Hong Kong',SG:'Singapore',CN:'China',AU:'Australia',NL:'the Netherlands',PT:'Portugal',GR:'Greece',ID:'Indonesia'};
 const VAL_EMO={'Experiences over things':'🎟️','Seeing the world':'🌏','Time with friends':'🥂','Convenience and your time':'⏱️','Little daily treats':'🧋','Music and live events':'🎶','Giving back':'🙏','Staying active':'🧗','Looking good':'✨'};
 document.addEventListener('submit',e=>{if(e.target.id!=='nameForm')return;e.preventDefault();const v=$('#nameIn').value.trim().slice(0,30);S.meta={...S.meta,name:v};UI.editName=false;if(!S.example)saveMeta();if(document.activeElement)document.activeElement.blur();pendingRender=false;requestRender()});
+// ---- Zodiac buddies (original full-body drawings) ----
+const ZOD=(()=>{
+  const K='#2b2420';
+  const mir=s=>`<g>${s}</g><g transform="translate(120 0) scale(-1 1)">${s}</g>`;
+  const eyes=(y=54,dx=11)=>`<ellipse cx="${60-dx}" cy="${y}" rx="2.7" ry="3.3" fill="${K}"/><ellipse cx="${60+dx}" cy="${y}" rx="2.7" ry="3.3" fill="${K}"/><circle cx="${60-dx+.9}" cy="${y-1.2}" r=".9" fill="#fff"/><circle cx="${60+dx+.9}" cy="${y-1.2}" r=".9" fill="#fff"/>`;
+  const blush=(y=60,dx=18,c='#ff8fa3')=>`<ellipse cx="${60-dx}" cy="${y}" rx="4.6" ry="2.8" fill="${c}" opacity=".55"/><ellipse cx="${60+dx}" cy="${y}" rx="4.6" ry="2.8" fill="${c}" opacity=".55"/>`;
+  const w=(y=60)=>`<path d="M56 ${y} q2 2.4 4 0 q2 2.4 4 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
+  // body: sitting pear + arms + feet; head on top
+  const body=(c,belly,paw,foot)=>`<ellipse cx="49" cy="107" rx="8.5" ry="4.6" fill="${foot||paw||c}"/><ellipse cx="71" cy="107" rx="8.5" ry="4.6" fill="${foot||paw||c}"/><ellipse cx="60" cy="90" rx="23" ry="19" fill="${c}"/>${belly?`<ellipse cx="60" cy="94" rx="13" ry="12" fill="${belly}"/>`:''}<ellipse cx="45" cy="92" rx="5" ry="7.5" fill="${paw||c}" transform="rotate(12 45 92)"/><ellipse cx="75" cy="92" rx="5" ry="7.5" fill="${paw||c}" transform="rotate(-12 75 92)"/>`;
+  const head=(c,st)=>`<ellipse cx="60" cy="53" rx="30" ry="25" fill="${c}"${st?` stroke="${st}" stroke-width="2"`:''}/>`;
+  const A=[
+    ['Rat',`<path d="M80 100 q22 4 22 -12 q0 -10 -9 -8" fill="none" stroke="#7d7380" stroke-width="3" stroke-linecap="round"/>${body('#b3a9b6','#e4dce6','#f2b6c3')}${mir('<circle cx="36" cy="32" r="13" fill="#b3a9b6"/><circle cx="36" cy="32" r="7.5" fill="#f2b6c3"/>')}${head('#b3a9b6')}${eyes(54,12)}${blush(61,19)}<ellipse cx="60" cy="58.5" rx="2.8" ry="2" fill="#e57d95"/>${w(61)}${mir('<path d="M42 59 L31 57 M42 62 L32 63" stroke="#8a8090" stroke-width="1.3" stroke-linecap="round"/>')}`],
+    ['Ox',`<path d="M82 98 q14 2 14 -10" fill="none" stroke="#7a5640" stroke-width="3.5" stroke-linecap="round"/><circle cx="96" cy="86" r="4" fill="#5a3e2d"/>${body('#9c7258','#e9d4bd',null,'#5a3e2d')}${mir('<path d="M40 36 Q26 30 28 14 Q34 26 46 30 Z" fill="#f4e6c8"/><ellipse cx="29" cy="48" rx="9" ry="5" fill="#86604a" transform="rotate(-20 29 48)"/>')}${head('#9c7258')}<path d="M53 29 q3.5 -6 7 0 q3.5 -6 7 0" fill="#6e4a36"/>${eyes(50,12)}${blush(56,20)}<ellipse cx="60" cy="64" rx="17" ry="10" fill="#e9d4bd"/><ellipse cx="54" cy="63" rx="2" ry="2.8" fill="#6b4a33"/><ellipse cx="66" cy="63" rx="2" ry="2.8" fill="#6b4a33"/><path d="M56 69 q4 3 8 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round"/>`],
+    ['Tiger',`<path d="M80 100 q20 2 18 -16 q-1 -6 -6 -6" fill="none" stroke="#f39a3b" stroke-width="6" stroke-linecap="round"/><path d="M93 92 l5 -2 M95 85 l5 1" stroke="#3a2a20" stroke-width="2.4" stroke-linecap="round"/>${body('#f6a144','#fff5e8')}<path d="M40 82 l6 2 M80 82 l-6 2 M42 88 l5 1 M78 88 l-5 1" stroke="#3a2a20" stroke-width="2.4" stroke-linecap="round"/>${mir('<circle cx="37" cy="33" r="9" fill="#f6a144"/><circle cx="37" cy="33" r="4.5" fill="#fff1e0"/>')}${head('#f6a144')}<path d="M60 29 v7 M52 30 q2 4 0 8 M68 30 q-2 4 0 8" stroke="#3a2a20" stroke-width="2.4" stroke-linecap="round" fill="none"/>${mir('<path d="M31 50 h7 M32 56 h6" stroke="#3a2a20" stroke-width="2.4" stroke-linecap="round"/>')}<ellipse cx="54.5" cy="61" rx="7" ry="5.5" fill="#fff5e8"/><ellipse cx="65.5" cy="61" rx="7" ry="5.5" fill="#fff5e8"/>${eyes(52,12)}${blush(59,20)}<path d="M57.5 57 h5 l-2.5 2.6z" fill="#e8657a"/>${w(61)}`],
+    ['Rabbit',`<circle cx="82" cy="100" r="6" fill="#fff" stroke="#e5dccf" stroke-width="2"/>${body('#fbf8f4','#fff','#fbf8f4')}<g stroke="#e5dccf" stroke-width="2" fill="none"><ellipse cx="60" cy="90" rx="23" ry="19"/></g>${mir('<ellipse cx="48" cy="20" rx="7.5" ry="20" fill="#fbf8f4" stroke="#e5dccf" stroke-width="2" transform="rotate(-10 48 20)"/><ellipse cx="48" cy="22" rx="3.6" ry="13" fill="#f7b7c4" transform="rotate(-10 48 22)"/>')}${head('#fbf8f4','#e5dccf')}${eyes(54)}${blush(60)}<ellipse cx="60" cy="58" rx="2.6" ry="1.9" fill="#f08aa0"/>${w(61)}`],
+    ['Dragon',`<path d="M78 102 q22 0 22 -16 q0 -10 -8 -10 q-6 0 -6 6" fill="none" stroke="#4fae79" stroke-width="7" stroke-linecap="round"/><path d="M98 80 l6 -4 l-1 7z" fill="#ef6b4f"/>${body('#5cb985','#f5d77a')}<path d="M52 86 h16 M52 92 h16 M53 98 h14" stroke="#e6c25a" stroke-width="1.6"/>${mir('<path d="M44 33 L36 10 L51 29 Z" fill="#f6c453"/><path d="M33 40 l-8 -3 l5 8z" fill="#ef6b4f"/>')}${head('#5cb985')}<path d="M53 29 l2.5 -8 l2.5 7 l2 -9 l2 9 l2.5 -7 l2.5 8 z" fill="#ef6b4f"/>${eyes(50,12)}${blush(56,20)}<ellipse cx="60" cy="64" rx="16" ry="10" fill="#a7dcbb"/><circle cx="55" cy="61.5" r="1.8" fill="#2f6b4a"/><circle cx="65" cy="61.5" r="1.8" fill="#2f6b4a"/><path d="M55 67 q5 4 10 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round"/>${mir('<path d="M44 66 q-12 2 -14 -6" fill="none" stroke="#f6c453" stroke-width="2.4" stroke-linecap="round"/>')}`],
+    ['Snake',`<ellipse cx="60" cy="104" rx="30" ry="8" fill="#5aa983"/><path d="M88 104 q10 -2 12 -8" fill="none" stroke="#5aa983" stroke-width="6" stroke-linecap="round"/><ellipse cx="60" cy="94" rx="25" ry="8" fill="#6fbf9a"/><ellipse cx="60" cy="85" rx="19" ry="7" fill="#5aa983"/><path d="M44 104 l4 -3 l4 3 l-4 3z M68 104 l4 -3 l4 3 l-4 3z M56 94 l4 -3 l4 3 l-4 3z" fill="#4c9a77"/><ellipse cx="60" cy="58" rx="27" ry="24" fill="#6fbf9a"/><path d="M55 40 l5 -5 l5 5 l-5 5z" fill="#4c9a77"/>${eyes(56,12)}${blush(63,19)}${w(64)}<path d="M60 69 v6 l-3 4 M60 75 l3 4" fill="none" stroke="#e2475b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`],
+    ['Horse',`<path d="M80 92 q18 -2 18 10 q-2 8 -10 6 q6 -4 2 -8 q-4 -4 -10 -2z" fill="#5b3b2a"/>${body('#c98b5a','#f0c49f',null,'#4a3324')}${mir('<path d="M38 38 L38 12 L54 30 Z" fill="#c98b5a"/><path d="M41 32 L41 20 L50 29 Z" fill="#f0c49f"/>')}${head('#c98b5a')}<path d="M40 34 q4 -16 20 -10 q12 -6 18 8 q-8 2 -13 -1 q-12 8 -25 3z" fill="#5b3b2a"/><path d="M57.5 36 h5 l1.5 22 h-8z" fill="#fff4e6"/>${eyes(50,13)}${blush(56,21)}<ellipse cx="60" cy="65" rx="16" ry="10" fill="#f0c49f"/><ellipse cx="54.5" cy="63.5" rx="1.9" ry="2.7" fill="#6b4a33"/><ellipse cx="65.5" cy="63.5" rx="1.9" ry="2.7" fill="#6b4a33"/><path d="M56 69.5 q4 3 8 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round"/>`],
+    ['Goat',`<path d="M80 92 q10 -4 10 4" fill="none" stroke="#ddd2bf" stroke-width="5" stroke-linecap="round"/>${body('#f5efe4','#fff','#f5efe4','#8b7d6b')}<g stroke="#ddd2bf" stroke-width="2" fill="none"><ellipse cx="60" cy="90" rx="23" ry="19"/></g>${mir('<path d="M46 32 q-4 -18 -22 -14 q-6 2 -4 8" fill="none" stroke="#9b9488" stroke-width="6" stroke-linecap="round"/><ellipse cx="28" cy="54" rx="10" ry="5" fill="#efe6d6" stroke="#ddd2bf" stroke-width="2" transform="rotate(20 28 54)"/>')}${head('#f5efe4','#ddd2bf')}${eyes(53)}${blush(60)}<ellipse cx="60" cy="58" rx="3" ry="2" fill="#8b7d6b"/>${w(61)}<path d="M55 76 q5 12 10 0z" fill="#ddd2bf"/>`],
+    ['Monkey',`<path d="M80 100 q20 0 18 -18 q-2 -10 -10 -6 q-4 4 2 7" fill="none" stroke="#8a5b3a" stroke-width="4" stroke-linecap="round"/>${body('#9b6a45','#f1c9a0')}${mir('<circle cx="29" cy="54" r="9" fill="#9b6a45"/><circle cx="29" cy="54" r="5" fill="#f1c9a0"/>')}${head('#9b6a45')}<circle cx="50" cy="51" r="10.5" fill="#f1c9a0"/><circle cx="70" cy="51" r="10.5" fill="#f1c9a0"/><ellipse cx="60" cy="63" rx="17" ry="11" fill="#f1c9a0"/><path d="M53 30 q7 -10 14 0 q-7 -4 -14 0z" fill="#6e4a32"/>${eyes(51,10)}${blush(60,17)}<circle cx="58" cy="59" r="1.2" fill="${K}"/><circle cx="62" cy="59" r="1.2" fill="${K}"/><path d="M54 64 q6 5 12 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round"/>`],
+    ['Rooster',`<path d="M78 92 q14 -24 26 -12 q-8 0 -10 8 q10 -8 14 2 q-8 0 -12 8z" fill="#e8473f"/><path d="M80 94 q12 -14 20 -6 q-8 2 -10 8z" fill="#f59a3e"/>${body('#fffaf0','#fff','#fffaf0','#f5b83d')}<g stroke="#ecd9a0" stroke-width="2" fill="none"><ellipse cx="60" cy="90" rx="23" ry="19"/></g><path d="M68 86 q10 2 8 12 q-8 -2 -8 -12z" fill="#f4e6c4"/><circle cx="50" cy="29" r="6.5" fill="#e8473f"/><circle cx="60" cy="25" r="8" fill="#e8473f"/><circle cx="70" cy="29" r="6.5" fill="#e8473f"/>${head('#fffaf0','#ecd9a0')}${eyes(52)}${blush(59)}<path d="M54.5 58 L65.5 58 L60 66 Z" fill="#f5b83d" stroke="#e5a22e" stroke-width="1.3" stroke-linejoin="round"/><path d="M60 66 q-4 8 0 9 q4 -1 0 -9z" fill="#e8473f"/>`],
+    ['Dog',`<path d="M80 92 q14 -6 12 -18 q-1 -6 -6 -4 q-4 4 0 8 q2 6 -8 10z" fill="#e39a4e"/><path d="M86 74 q-3 3 0 6" fill="none" stroke="#fff5e8" stroke-width="3" stroke-linecap="round"/>${body('#e39a4e','#fff5e8','#fff5e8','#fff5e8')}${mir('<path d="M36 40 L36 18 L52 31 Z" fill="#e39a4e"/><path d="M39 35 L39 24 L48 31 Z" fill="#fff5e8"/>')}${head('#e39a4e')}<path d="M36 56 q8 -12 24 -6 q16 -6 24 6 q-4 18 -24 18 q-20 0 -24 -18z" fill="#fff5e8"/>${eyes(52,12)}${blush(59,19)}<ellipse cx="60" cy="58" rx="3.6" ry="2.6" fill="${K}"/>${w(61)}`],
+    ['Pig',`<path d="M82 96 q6 -2 6 4 q0 4 -4 3 q-2 -2 1 -3 q3 2 5 -2" fill="none" stroke="#e98aa0" stroke-width="2.4" stroke-linecap="round"/>${body('#f8b6c3','#fcd3db','#f8b6c3','#e98aa0')}${mir('<path d="M34 40 L34 20 L52 30 Z" fill="#f08ca2"/>')}${head('#f8b6c3')}${eyes(51,13)}${blush(58,20,'#ef6f8b')}<ellipse cx="60" cy="60" rx="9.5" ry="6.5" fill="#f392a8"/><ellipse cx="56.8" cy="60" rx="1.8" ry="2.6" fill="#c5607a"/><ellipse cx="63.2" cy="60" rx="1.8" ry="2.6" fill="#c5607a"/><path d="M56 70 q4 3 8 0" fill="none" stroke="${K}" stroke-width="1.8" stroke-linecap="round"/>`],
+  ];
+  const svg=(i,size=120)=>`<svg viewBox="0 0 120 120" width="${size}" height="${size}" role="img" aria-label="${A[i][0]}"><ellipse cx="60" cy="113" rx="30" ry="3.5" fill="#000" opacity=".1"/>${A[i][1]}</svg>`;
+  return {names:A.map(a=>a[0]),svg};
+})();
+function zodiacIdx(){
+  if(S.example)return 2;
+  let z=S.meta&&S.meta.zodiac;
+  if(!(Number.isInteger(z)&&z>=0&&z<12)){z=Math.floor(Math.random()*12);S.meta={...S.meta,zodiac:z};setTimeout(()=>saveMeta(),0)}
+  return z;
+}
 function whoHtml(SP,total,nM,b){
   if(!SP.length||total<=0)return '';
   const P=personaHtml(SP,total,nM),St=summaryHtml(SP,total,nM,b);
-  const nm=((S.meta&&S.meta.name)||S.myName||'').trim();
+  const nm=((S.meta&&S.meta.name)||S.myName||holderFirst()||'').trim();
+  const zi=zodiacIdx(),zn=ZOD.names[zi];
   const pName=P.name.replace(/^The\s+/,'');
   const nameCtl=UI.editName||!nm?`<form id="nameForm" class="name-form"><input class="pass" id="nameIn" value="${esc(nm)}" placeholder="Your first name" aria-label="Your first name" maxlength="30"><button class="btn" type="submit">Save</button></form>`:`<button class="btn ghost name-edit" data-act="name-edit" aria-label="Change your name">✎ Edit name</button>`;
-  return `<section class="card c12 story persona"><div class="card-h"><h2 class="p-hello">Hi${nm?' '+esc(nm):''}, you’re ${/^[aeiou]/i.test(pName)?'an':'a'}</h2><span class="sub" style="display:flex;gap:10px;align-items:center">${nameCtl}<span>${b.single?mLabel(b.from,true):nM+' month'+(nM>1?'s':'')+' of statements'}</span></span></div>
-    <div class="p-top"><div class="p-name">${esc(pName)}</div><p class="p-desc">${esc(P.desc)}</p>
-      ${St.tags.length?`<div class="tags" style="margin:14px 0 0">${St.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>`:''}</div>
-    ${P.vals.length?`<div class="st-h" style="margin-top:22px">What you value</div><ul class="p-vals">${P.vals.map(v=>`<li><b>${esc(v[1])} <span aria-hidden="true">${VAL_EMO[v[1]]||'⭐'}</span></b><span>${esc(v[2])}</span></li>`).join('')}</ul>`:''}
+  return `<section class="card c12 persona">
+    <div class="p-hero">
+      <div class="p-main">
+        <div class="p-meta"><span class="p-chip">${b.single?mLabel(b.from,true):nM+' month'+(nM>1?'s':'')+' of statements'}</span>${nameCtl}</div>
+        <h2 class="p-hello">Hi${nm?' '+esc(nm):''}, you’re ${/^[aeiou]/i.test(pName)?'an':'a'}</h2>
+        <div class="p-name">${esc(pName)}</div>
+        <p class="p-desc">${esc(P.desc)}</p>
+        ${St.tags.length?`<div class="tags p-tags">${St.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>`:''}
+      </div>
+      <figure class="p-pet"><div class="p-pet-disc">${ZOD.svg(zi,128)}</div><figcaption>Your spending buddy<b>The ${zn}</b></figcaption></figure>
+    </div>
+    ${P.vals.length?`<div class="st-h p-vh">What you value</div><ul class="p-vals">${P.vals.map(v=>`<li><span class="p-ve" aria-hidden="true">${VAL_EMO[v[1]]||'⭐'}</span><b>${esc(v[1])}</b><span>${esc(v[2])}</span></li>`).join('')}</ul>`:''}
 </section>`;
 }
 function storyHtml(SP,total,nM,b){
@@ -1330,12 +1388,12 @@ async function processFile(it){
   const f=it.f;const buf=await f.arrayBuffer();const id='s_'+await hashBuf(buf);
   if(S.statements[id]){it.skip=true;it.status='Already added';return}
   const set=(t)=>{it.status=t;renderSheet()};
-  let rows=[],account=null,period=null,reported=null,source='parser',header='';
+  let rows=[],account=null,period=null,reported=null,source='parser',header='',holder=null;
   if(/\.pdf$/i.test(f.name)||f.type==='application/pdf'){
     set('Reading PDF…');
     const lines=await pdfLines(buf);const text=lines.join('\n');header=lines.slice(0,40).join('\n');
     if(text.replace(/\s/g,'').length<80)throw new Error('This PDF has no readable text (it may be a scan). Download the statement or a CSV export from your bank instead.');
-    period=findPeriod(text);reported=findSummary(text);account=accountFromText(text);
+    period=findPeriod(text);reported=findSummary(text);account=accountFromText(text);holder=holderFromLines(lines);
     rows=heuristicParse(lines,period);
     const rep=reportedTotals(reported);
     const ok=rows.length&&rep&&rep.out!=null&&Math.abs(rows.filter(t=>t.a>0).reduce((s,t)=>s+t.a,0)-rep.out)<.01&&(rep.in==null||Math.abs(rows.filter(t=>t.a<0).reduce((s,t)=>s-t.a,0)-rep.in)<.01);
@@ -1350,7 +1408,7 @@ async function processFile(it){
     let table;
     if(/\.xlsx?$/i.test(f.name)){await loadXLSX();const wb=XLSX.read(buf,{type:'array'});table=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:''})}
     else table=parseDelimited(new TextDecoder().decode(buf));
-    rows=tableToTxns(table);source=rows.kind==='venmo'?'venmo':'table';
+    rows=tableToTxns(table);source=rows.kind==='venmo'?'venmo':'table';holder=rows.holder||null;
     if(!rows.length)throw new Error('No transactions found in this file.');
     const ds=rows.map(r=>r.d).sort();period={start:ds[0],end:ds[ds.length-1]};
     account=rows.account||f.name.replace(/\.[^.]+$/,'').replace(/[_-]+/g,' ').slice(0,40);
@@ -1366,7 +1424,7 @@ async function processFile(it){
     catch(e){note=aiErr(e)}
   }
   for(const r of rows){if(!r.c){const k=rawKey(r.raw);const v=S.merchants[k]||(r.venmo?{m:r.m,c:venmoCat(r.note,r.who)}:{m:cleanName(r.raw),c:ruleCat(r.raw,r.a)});if(!S.merchants[k]&&!sampleFn)S.merchants[k]=v;r.m=r.m||v.m;r.c=v.c}}
-  const doc={name:f.name,account:account||'Account',period,reported,source,uploadedAt:new Date().toISOString(),txns:rows.map(r=>({d:r.d,r:String(r.raw).slice(0,120),m:r.m||cleanName(r.raw),a:r.a,c:r.c||'Other'}))};
+  const doc={name:f.name,account:account||'Account',...(holder?{holder}:{}),period,reported,source,uploadedAt:new Date().toISOString(),txns:rows.map(r=>({d:r.d,r:String(r.raw).slice(0,120),m:r.m||cleanName(r.raw),a:r.a,c:r.c||'Other'}))};
   S.statements[id]=doc;
   write(id,doc);saveMerchants();
   const rep=reportedTotals(reported);const out=rows.filter(t=>t.a>0).reduce((s,t)=>s+t.a,0),inn=rows.filter(t=>t.a<0).reduce((s,t)=>s-t.a,0);
@@ -1429,6 +1487,7 @@ document.addEventListener('click',e=>{
   if(act==='pick')$('#fileIn').click();
   else if(act==='close-sheet')closeSheet();
   else if(act==='lock')lockNow();
+  else if(act==='guide-done'){UI.lock=null;render();window.scrollTo(0,0)}
   else if(act==='export')exportBackup();
   else if(act==='import-pick')$('#impIn').click();
   else if(act==='import-cancel'){pendingImport=null;UI.lock=V.key?null:(readVault()?'unlock':'setup');render()}
@@ -1513,11 +1572,35 @@ addEventListener('drop',e=>{e.preventDefault();dragDepth=0;document.querySelecto
   mq.addEventListener&&mq.addEventListener('change',()=>{if(!ls.get('pb.theme'))sw.checked=mq.matches});
 })();
 // ================= Boot =================
-{const h=(location.hash||'').slice(1);if(['overview','transactions','recurring','budgets','statements'].includes(h))UI.view=h}
+{const h=(location.hash||'').slice(1);if(['overview','transactions','recurring','statements'].includes(h))UI.view=h}
 render();
 initStore();
 let rzT=null,lastW=innerWidth;addEventListener('resize',()=>{if(Math.abs(innerWidth-lastW)<40)return;clearTimeout(rzT);rzT=setTimeout(()=>{lastW=innerWidth;if(UI.view==='overview')requestRender()},200)});
 
+function guideView(){
+  const step=(n,t,d)=>`<li><span class="n">${n}</span><span><b>${t}</b> ${d}</span></li>`;
+  const w=(ic,t,d)=>`<div><span aria-hidden="true">${ic}</span><div><b>${t}</b> ${d}</div></div>`;
+  return `<section class="card guide" aria-labelledby="gT"><h2 id="gT">Getting started</h2><p class="lede">Six steps to see where your money goes.</p>
+  <ol class="g-steps">
+  ${step(1,'Download your statements.','Log into each bank, credit card and debit card account, plus Venmo, and download your statements. PDF, CSV and Excel all work. Most banks keep them under “Statements” or “Documents.” For Venmo, go to venmo.com → Statements and download the CSV. The more months you add, the better your averages; 6 to 12 months works best.')}
+  ${step(2,'Add them here.','Click <b>Add statements</b> and drop them all in at once. They’re read right here on your computer and never uploaded.')}
+  ${step(3,'Check that the numbers match.','Open the <b>Statements</b> tab. Each statement shows whether its total matches what the bank reported. If one doesn’t match, compare it with your real statement.')}
+  ${step(4,'Fix any wrong categories.','In <b>Transactions</b>, click a category to change it. Spend It remembers the merchant, so the fix applies everywhere.')}
+  ${step(5,'Explore.','See where your money goes, your habits, your recurring charges and your projected savings.')}
+  ${step(6,'Save a backup.','In the <b>Statements</b> tab, click <b>Save backup</b> to download an encrypted copy, and do it again after adding new statements.')}
+  </ol>
+  <h3>Before you start</h3>
+  <div class="g-warn">
+  ${w('💻','Spend It is made for computers.','Use it in Chrome, Edge, Firefox or Safari on a laptop or desktop. It opens on phones, but downloading statements and reading the charts is much easier on a bigger screen.')}
+  ${w('⚠️','Write down your passcode.','There’s no “forgot passcode.” Nobody can reset it, including whoever runs this site. Lose it and your data is gone unless you have a backup.')}
+  ${w('⚠️','Your data lives only in this browser, on this computer.','<ul><li>Clearing your browsing history or site data erases it.</li><li>Private or incognito mode erases it when you close the window.</li><li>On a new computer, restore a backup to bring it over.</li></ul>')}
+  ${w('⚠️','Only download statements from your bank’s real website or app,','and only use Spend It at this exact link. Ignore copies at other addresses.')}
+  ${w('⚠️','Don’t use it on shared or public computers.','Click <b>Lock</b> when you’re done. It also locks itself after 10 minutes.')}
+  ${w('⚠️','Keep your backup file somewhere safe.','It’s encrypted, but treat it like any other financial document.')}
+  ${w('🔒','Could my info leak?','<ul><li><b>Nothing is uploaded.</b> Your statements are read on your computer, and the site is blocked from sending data anywhere.</li><li><b>Your data is encrypted</b> with your passcode and saved only in this browser. Without the passcode, nobody can read it, including whoever runs this site.</li><li><b>The remaining risks are on your own computer:</b> a virus, a malicious browser extension, or someone using it while Spend It is unlocked. These are the same risks you take when you log into your bank’s website.</li></ul>')}
+  ${w('ℹ️','Categories are automatic best guesses.','Spend It is a tool to see your spending, not financial advice.')}
+  </div>
+  <div class="g-go"><button class="btn primary" data-act="guide-done">${Object.keys(S.statements||{}).length?'Back to my dashboard':'Got it, let’s start'}</button></div></section>`}
 function importView(){return `<section class="card lock"><div class="lock-ic" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12M7 10l5 5 5-5M4 19h16"/></svg></div>
   <h2>Restore backup</h2><p class="lede">Enter the passcode that was used when this backup was saved. It will replace what’s on this device.</p>
   <form id="importForm" class="lock-form" autocomplete="off"><input class="pass" id="impPass" type="password" placeholder="Backup passcode" aria-label="Backup passcode" required>
@@ -1529,6 +1612,7 @@ $('#impIn').addEventListener('change',async e=>{
   catch(x){toast('That file isn’t a Spend It backup.')}
 });
 $('#lockBtn').addEventListener('click',()=>lockNow());
+$('#helpBtn').addEventListener('click',()=>{if(!V.key)return;if(typeof sheetOpen!=='undefined'&&sheetOpen)closeSheet();UI.lock='guide';render()});
 document.addEventListener('submit',async e=>{
   if(e.target.id!=='passForm')return;e.preventDefault();
   const a=$('#np1').value,b=$('#np2').value,err=$('#npErr');err.textContent='';
